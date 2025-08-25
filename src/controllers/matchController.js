@@ -271,4 +271,56 @@ const toggleReadyStatus = async (req, res) => {
     }
 };
 
-export { getAllMatches, getMatchById, joinTeam, leaveTeam, toggleReadyStatus };
+// @desc    Admin bắt đầu trận đấu
+// @route   POST /api/matches/:id/start
+// @access  Admin
+const startMatch = async (req, res) => {
+    const { id: matchId } = req.params;
+
+    try {
+        // 1. Kiểm tra trận đấu có tồn tại và đang ở trạng thái "waiting" không
+        const [matchRows] = await pool.query(`
+            SELECT match_status
+            FROM matches
+            WHERE id = ?`, [matchId]
+        );
+        if (matchRows.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy trận đấu' });
+        }
+        if (matchRows[0].match_status !== 'waiting') {
+            return res.status(400).json({ message: 'Trận đấu không ở trạng thái chờ' });
+        }
+
+        // 2. Kiểm tra tất cả người chơi đã sẵn sàng chưa
+        const teamIdsInMatch = [matchId*2-1, matchId*2];
+        const [captainRows] = await pool.query(`
+            SELECT captain_id
+            FROM teams
+            WHERE id IN (?, ?)`, teamIdsInMatch
+        );
+        console.log(captainRows.length);
+        if (captainRows[0].captain_id === null || captainRows[1].captain_id === null) {
+            return res.status(404).json({ message: 'Có đội của trận này chưa có captain' });
+        }
+        const [playerRows] = await pool.query(`
+            SELECT is_ready
+            FROM players
+            WHERE team_id IN (?, ?)`, teamIdsInMatch
+        );
+        const allReady = playerRows.every(p => p.is_ready === 1);
+        if (!allReady) {
+            return res.status(400).json({ message: 'Tất cả người chơi chưa sẵn sàng' });
+        }
+        await pool.query(`
+            UPDATE matches
+            SET match_status = "in_progress"
+            WHERE id = ?`, [matchId]
+        );
+        res.status(200).json({ message: 'Trận đấu đã bắt đầu thành công!' });
+    } catch (error) {
+        console.error('Lỗi khi bắt đầu trận đấu:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+export { getAllMatches, getMatchById, joinTeam, leaveTeam, toggleReadyStatus, startMatch };
