@@ -137,5 +137,138 @@ const joinTeam = async (req, res) => {
     }
 };
 
+// @desc    Người dùng rời khỏi đội trong trận đấu
+// @route   POST /api/matches/:id/leave
+// @access  Private
+const leaveTeam = async (req, res) => {
+    const { id: matchId } = req.params;
+    const userId = req.user.id;
 
-export { getAllMatches, getMatchById, joinTeam };
+    try {
+        // 1. Kiểm tra trận đấu có tồn tại và đang ở trạng thái "waiting" không
+        const [matchRows] = await pool.query(`
+            SELECT match_status
+            FROM matches
+            WHERE id = ?`, [matchId]
+        );
+        if (matchRows.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy trận đấu' });
+        }
+        if (matchRows[0].match_status !== 'waiting') {
+            return res.status(400).json({ message: 'Không thể rời đội khi trận đấu đã bắt đầu' });
+        }
+
+        // 2. Tìm xem người dùng đang ở đội nào trong trận này
+        const teamIdsInMatch = [matchId*2-1, matchId*2];
+        const [playerRows] = await pool.query(`
+            SELECT *
+            FROM players
+            WHERE user_id = ? AND team_id IN (?, ?)`, [userId, ...teamIdsInMatch]
+        );
+        if (playerRows.length === 0) {
+            return res.status(404).json({ message: 'Bạn không ở trong đội nào của trận này' });
+        }
+        const { team_id: teamId } = playerRows[0];
+
+        // 3. Xử lý logic chuyển đội trưởng (nếu cần)
+        const [teamRows] = await pool.query(`
+            SELECT captain_id
+            FROM teams
+            WHERE id = ?`, [teamId]
+        );
+        const isCaptain = teamRows[0].captain_id == userId;
+
+        if (isCaptain) {
+            // Tìm người chơi khác trong đội để chuyển quyền
+            const [otherPlayers] = await pool.query(`
+                SELECT user_id
+                FROM players
+                WHERE team_id = ? AND user_id != ?
+                ORDER BY joined_at
+                ASC LIMIT 1`, [teamId, userId]
+            );
+
+            if (otherPlayers.length === 0) {
+                // Không còn ai, reset đội trưởng
+                await pool.query(`
+                    UPDATE teams
+                    SET captain_id = NULL
+                    WHERE id = ?`, [teamId]
+                );
+            } else {
+                // Có người chơi khác, chuyển quyền cho người vào sớm nhất
+                const newCaptainId = otherPlayers[0].user_id;
+                await pool.query(`
+                    UPDATE teams
+                    SET captain_id = ?
+                    WHERE id = ?`, [newCaptainId, teamId]
+                );
+            }
+        }
+
+        // 4. Xóa người chơi khỏi bảng `players`
+        await pool.query(`
+            DELETE FROM players
+            WHERE user_id = ? AND team_id = ?`, [userId, teamId]
+        );
+
+        res.status(200).json({ message: 'Rời đội thành công' });
+    } catch (error) {
+            console.error('Lỗi khi rời đội:', error);
+            res.status(500).json({ message: 'Lỗi' });
+    }
+};
+
+// @desc    Bật/tắt trạng thái sẵn sàng của người chơi
+// @route   POST /api/matches/:id/ready
+// @access  Private
+const toggleReadyStatus = async (req, res) => {
+    const { id: matchId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        // 1. Kiểm tra trận đấu có tồn tại và đang ở trạng thái "waiting" không
+        const [matchRows] = await pool.query(`
+            SELECT match_status
+            FROM matches
+            WHERE id = ?`, [matchId]
+        );
+        if (matchRows.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy trận đấu' });
+        }
+        if (matchRows[0].match_status !== 'waiting') {
+            return res.status(400).json({ message: 'Không thể rời đội khi trận đấu đã bắt đầu' });
+        }
+
+        // 2. Tìm xem người dùng đang ở đội nào trong trận này
+        const teamIdsInMatch = [matchId*2-1, matchId*2];
+        const [playerRows] = await pool.query(`
+            SELECT *
+            FROM players
+            WHERE user_id = ? AND team_id IN (?, ?)`, [userId, ...teamIdsInMatch]
+        );
+        if (playerRows.length === 0) {
+            return res.status(404).json({ message: 'Bạn không ở trong đội nào của trận này' });
+        }
+
+        // 3. Cập nhật trạng thái is_ready (đảo ngược giá trị hiện tại)
+        const currentPlayerRecord = playerRows[0];
+        const newReadyState = !currentPlayerRecord.is_ready;
+
+        await pool.query(`
+            UPDATE players
+            SET is_ready = ?
+            WHERE user_id = ? AND team_id = ?`, [newReadyState, userId, currentPlayerRecord.team_id]
+        );
+
+        res.status(200).json({
+            message: 'Trạng thái sẵn sàng đã được cập nhật',
+            isReady: newReadyState
+        });
+    } catch (error) {
+        console.error('Lỗi khi cập nhật trạng thái sẵn sàng:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+export { getAllMatches, getMatchById, joinTeam, leaveTeam, toggleReadyStatus };
