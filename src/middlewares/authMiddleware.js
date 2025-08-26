@@ -47,4 +47,26 @@ const isAdmin = async (req, res, next) => {
     }
 };
 
-export { protect, isAdmin };
+const isCaptain = async (req, res, next) => {
+    const { id: matchId } = req.params;
+    const userId = req.user.id;
+
+    try {
+        const teamIdsInMatch = [matchId*2-1, matchId*2];
+        
+        const [teams] = await pool.query(`
+            SELECT captain_id
+            FROM teams
+            WHERE id IN (?, ?) AND captain_id = ?`, [...teamIdsInMatch, userId]
+        );
+        if (teams.length > 0) {
+            next();
+        } else {
+            res.status(403).json({ message: 'Yêu cầu quyền Đội trưởng' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: 'Lỗi server khi kiểm tra quyền Đội trưởng' });
+    }
+};
+
+export { protect, isAdmin, isCaptain };

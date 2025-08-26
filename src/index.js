@@ -5,6 +5,7 @@ import pool from './config/db.js';
 
 import matchRoute from './routes/matchRoute.js';
 import authRoute from './routes/authRoute.js';
+import rconRoute from './routes/rconRoute.js';
 
 dotenv.config();
 
@@ -24,6 +25,7 @@ app.get('/', (req, res) => {
 // Su dung routes
 app.use('/api/matches', matchRoute);
 app.use('/api/auth', authRoute);
+app.use('api/rcon', rconRoute);
 
 // Khoi dong server
 app.listen(PORT, () => {

@@ -323,4 +323,266 @@ const startMatch = async (req, res) => {
     }
 };
 
-export { getAllMatches, getMatchById, joinTeam, leaveTeam, toggleReadyStatus, startMatch };
+// @desc    Đội trưởng cấm một map
+// @route   POST /api/matches/:id/ban
+// @access  Captain
+const banMap = async (req, res) => {
+    const { id: matchId } = req.params;
+    const { map_name } = req.body;
+    const captain_id = req.user.id;
+
+    try {
+        // 1. Kiểm tra trạng thái trận đấu phải là 'in_progress'
+        const [matchRows] = await pool.query(`
+            SELECT bo_mode, match_status
+            FROM matches
+            WHERE id = ?`, [matchId]
+        );
+        if (matchRows.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy trận đấu' });
+        }
+        if (matchRows[0].match_status !== 'in_progress') {
+            return res.status(400).json({ message: 'Trận đấu chưa bắt đầu hoặc đã kết thúc' });
+        }
+
+        // 2. Lấy lịch sử ban/pick và thông tin đội của captain
+        const [mapHistory] = await pool.query(`
+            SELECT *
+            FROM maps
+            WHERE match_id = ?
+            ORDER BY action_time ASC`, [matchId]
+        );
+        const [captainTeam] = await pool.query(`
+            SELECT id
+            FROM teams
+            WHERE captain_id = ?`, [captain_id]
+        );
+        const teamId = captainTeam[0].id;
+        const teamIdentifier = (teamId % 2 !== 0) ? 'team1' : 'team2';
+
+        // 3. Logic xác định lượt (đơn giản hóa cho BO3)
+        // BO3 sequence: Ban(T1), Ban(T2), Pick(T1), Pick(T2), Ban(T1), Ban(T2), Decider
+        const turn = mapHistory.length;
+        let expectedTurnTeam, expectedAction;
+
+        if (matchRows[0].bo_mode === 'bo1') {
+            switch (turn) {
+                case 0: expectedTurnTeam = 'team1'; expectedAction = 'ban'; break; // Lượt 1: team1 ban
+                case 1: expectedTurnTeam = 'team2'; expectedAction = 'ban'; break; // Lượt 2: team2 ban
+                case 2: expectedTurnTeam = 'team1'; expectedAction = 'ban'; break; // Lượt 3: team1 ban
+                case 3: expectedTurnTeam = 'team2'; expectedAction = 'ban'; break; // Lượt 4: team2 ban
+                case 4: expectedTurnTeam = 'team1'; expectedAction = 'ban'; break; // Lượt 5: team1 ban
+                case 5: expectedTurnTeam = 'team2'; expectedAction = 'ban'; break; // Lượt 6: team2 ban
+                default: return res.status(400).json({ message: 'Không phải lượt cấm map hoặc Veto đã kết thúc' });
+            }
+        } else if (matchRows[0].bo_mode === 'bo3') {
+            switch (turn) {
+                case 0: expectedTurnTeam = 'team1'; expectedAction = 'ban'; break; // Lượt 1: team1 ban
+                case 1: expectedTurnTeam = 'team2'; expectedAction = 'ban'; break; // Lượt 2: team2 ban
+                // ... các lượt pick sẽ được xử lý ở API pick
+                case 4: expectedTurnTeam = 'team1'; expectedAction = 'ban'; break; // Lượt 5: team1 ban
+                case 5: expectedTurnTeam = 'team2'; expectedAction = 'ban'; break; // Lượt 6: team2 ban
+                default: return res.status(400).json({ message: 'Không phải lượt cấm map hoặc Veto đã kết thúc' });
+            }
+        } else if (matchRows[0].bo_mode === 'bo5') {
+            switch (turn) {
+                case 0: expectedTurnTeam = 'team1'; expectedAction = 'ban'; break; // Lượt 1: team1 ban
+                case 1: expectedTurnTeam = 'team2'; expectedAction = 'ban'; break; // Lượt 2: team2 ban
+                // ... các lượt pick sẽ được xử lý ở API pick
+                default: return res.status(400).json({ message: 'Không phải lượt cấm map hoặc Veto đã kết thúc' });
+            }
+        }
+        if (teamIdentifier !== expectedTurnTeam) {
+            return res.status(400).json({ message: 'Chưa đến lượt của đội bạn' });
+        }
+
+        // 4. Kiểm tra map có hợp lệ và chưa được sử dụng không
+        if (!map_name) {
+            return res.status(400).json({ message: 'Vui lòng cung cấp tên map' });
+        }
+        const isMapUsed = mapHistory.some(m => m.map_name === map_name);
+        if (isMapUsed) {
+            return res.status(400).json({ message: 'Map này đã được cấm hoặc chọn' });
+        }
+
+        // 5. Thêm hành động vào DB
+        await pool.query(`
+            INSERT INTO maps (match_id, map_name, action_type, team_action)
+            VALUES (?, ?, ?, ?)`, [matchId, map_name, 'ban', teamIdentifier]
+        );
+        res.status(200).json({ message: `Đội ${teamIdentifier} đã cấm map ${map_name}` });
+    } catch (error) {
+        console.error('Lỗi khi cấm map:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+// @desc    Đội trưởng chọn một map
+// @route   POST /api/matches/:id/pick
+// @access  Captain
+const pickMap = async (req, res) => {
+    const { id: matchId } = req.params;
+    const { map_name } = req.body;
+    const captainId = req.user.id;
+
+    try {
+        // 1. Kiểm tra trạng thái trận đấu phải là 'in_progress'
+        const [matchRows] = await pool.query(`
+            SELECT bo_mode, match_status
+            FROM matches
+            WHERE id = ?`, [matchId]
+        );
+        if (matchRows.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy trận đấu' });
+        }
+        if (matchRows[0].match_status !== 'in_progress') {
+            return res.status(400).json({ message: 'Trận đấu chưa bắt đầu hoặc đã kết thúc' });
+        }
+
+        // 2. Lấy lịch sử ban/pick và thông tin đội của captain
+        const [mapHistory] = await pool.query(`
+            SELECT *
+            FROM maps
+            WHERE match_id = ?
+            ORDER BY action_time ASC`, [matchId]
+        );
+        const [captainTeam] = await pool.query(`
+            SELECT id
+            FROM teams
+            WHERE captain_id = ?`, [captain_id]
+        );
+        const teamId = captainTeam[0].id;
+        const teamIdentifier = (teamId % 2 !== 0) ? 'team1' : 'team2';
+        
+        // 3. Logic xác định lượt
+        // BO1 sequence: Ban(T1), Ban(T2), Ban(T1), Ban(T2), Ban(T1), Ban(T2), Decider
+        // BO3 sequence: Ban(T1), Ban(T2), Pick(T1), Pick(T2), Ban(T1), Ban(T2), Decider
+        // BO5 sequence: Ban(T1), Ban(T2), Pick(T1), Pick(T2), Pick(T1), Pick(T2), Decider
+        const turn = mapHistory.length;
+        let expectedTurnTeam, expectedAction;
+
+        if (matchRows[0].bo_mode === 'bo1') {
+            return res.status(400).json({ message: 'Không phải lượt chọn map hoặc Veto đã kết thúc' });
+        } else if (matchRows[0].bo_mode === 'bo3') {
+            switch (turn) {
+                // ... các lượt ban sẽ được xử lý ở API ban
+                case 2: expectedTurnTeam = 'team1'; expectedAction = 'pick'; break; // Lượt 1: team1 pick
+                case 3: expectedTurnTeam = 'team2'; expectedAction = 'pick'; break; // Lượt 2: team2 pick
+                default: return res.status(400).json({ message: 'Không phải lượt chọn map hoặc Veto đã kết thúc' });
+            }
+        } else if (matchRows[0].bo_mode === 'bo5') {
+            switch (turn) {
+                // ... các lượt ban sẽ được xử lý ở API bam
+                case 2: expectedTurnTeam = 'team1'; expectedAction = 'pick'; break; // Lượt 3: team1 pick
+                case 3: expectedTurnTeam = 'team2'; expectedAction = 'pick'; break; // Lượt 4: team2 pick
+                case 4: expectedTurnTeam = 'team1'; expectedAction = 'pick'; break; // Lượt 5: team1 pick
+                case 5: expectedTurnTeam = 'team2'; expectedAction = 'pick'; break; // Lượt 6: team2 pick
+                default: return res.status(400).json({ message: 'Không phải lượt chọn map hoặc Veto đã kết thúc' });
+            }
+        }
+        if (teamIdentifier !== expectedTurnTeam) {
+            return res.status(400).json({ message: 'Chưa đến lượt của đội bạn' });
+        }
+        
+        // 4. Kiểm tra map có hợp lệ và chưa được sử dụng không
+        if (!map_name) {
+            return res.status(400).json({ message: 'Vui lòng cung cấp tên map' });
+        }
+        const isMapUsed = mapHistory.some(m => m.map_name === map_name);
+        if (isMapUsed) {
+            return res.status(400).json({ message: 'Map này đã được cấm hoặc chọn' });
+        }
+
+        // 5. Thêm hành động vào DB
+        await pool.query(`
+            INSERT INTO maps (match_id, map_name, action_type, team_action)
+            VALUES (?, ?, ?, ?)`, [matchId, map_name, 'pick', teamIdentifier]
+        );
+        res.status(200).json({ message: `Đội ${teamIdentifier} đã chọn map ${map_name}` });
+    } catch (error) {
+        console.error('Lỗi khi chọn map:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+// @desc    Đội trưởng chọn phe cho map đối phương đã pick
+// @route   POST /api/matches/:id/side
+// @access  Captain
+const chooseSide = async (req, res) => {
+    const { id: matchId } = req.params;
+    const { map_name, side } = req.body;
+    const captainId = req.user.id;
+
+    try {
+        // 1. Validate input
+        if (!map_name || !side) {
+            return res.status(400).json({ message: 'Vui lòng cung cấp map_name và side' });
+        }
+        if (!['ct', 't'].includes(side.toLowerCase())) {
+            return res.status(400).json({ message: 'Side không hợp lệ, phải là "ct" hoặc "t"' });
+        }
+
+        // 2. Lấy thông tin map đã được pick
+        const [mapRows] = await pool.query(`
+            SELECT *
+            FROM maps
+            WHERE match_id = ? AND map_name = ? AND action_type = "pick"`, [matchId, map_name]
+        );
+        if (mapRows.length === 0) {
+            return res.status(404).json({ message: 'Map này chưa được pick trong trận đấu' });
+        }
+        if (mapRows[0].side_team !== null) {
+            return res.status(400).json({ message: 'Phe của map này đã được chọn' });
+        }
+        const teamThatPicked = mapRows[0].team_action; // Ví dụ: 'team1'
+
+        // 3. Kiểm tra quyền: người chọn side phải là captain của đội đối phương
+        const [captainTeam] = await pool.query(`
+            SELECT id
+            FROM teams
+            WHERE captain_id = ?`, [captainId]
+        );
+        const captainTeamId = captainTeam[0].id;
+        const captainTeamIdentifier = (captainTeam % 2 !== 0) ? 'team1' : 'team2';
+
+        if (captainTeamIdentifier === teamThatPicked) {
+            return res.status(403).json({ message: 'Đội của bạn không có quyền chọn phe cho map này' });
+        }
+
+        // 4. Cập nhật phe đã chọn vào DB
+        await pool.query(`
+            UPDATE maps
+            SET side_team = ?
+            WHERE match_id = ? AND map_name = ?`, [side.toLowerCase(), matchId, map_name]
+        );
+
+        res.status(200).json({ message: `Đội ${captainTeamIdentifier} đã chọn phe ${side.toUpperCase()} cho map ${map_name}` });
+    } catch (error) {
+        console.error('Lỗi khi chọn phe:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+// @desc    Lấy lịch sử cấm/chọn map của một trận đấu
+// @route   GET /api/matches/:id/maps
+// @access  Public
+const getMapHistory = async (req, res) => {
+    const { id: matchId } = req.params;
+
+    try {
+        const [mapHistory] = await pool.query(`
+            SELECT * 
+            FROM maps 
+            WHERE match_id = ? 
+            ORDER BY action_time ASC`, [matchId]
+        );
+    
+        // Luôn trả về một mảng, kể cả khi rỗng
+        res.status(200).json(mapHistory);
+    } catch (error) {
+        console.error('Lỗi khi lấy lịch sử map:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+export { getAllMatches, getMatchById, joinTeam, leaveTeam, toggleReadyStatus, startMatch, banMap, pickMap, chooseSide, getMapHistory };

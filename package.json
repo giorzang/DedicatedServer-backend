@@ -18,7 +18,8 @@
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.14.3",
     "passport": "^0.7.0",
-    "passport-steam": "^1.0.18"
+    "passport-steam": "^1.0.18",
+    "rcon-client": "^4.2.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

@@ -36,3 +36,8 @@
 | **Method** | **Endpoint** | **Mô tả** |
 |------------|--------------|-----------|
 | `POST` | `/api/rcon` | (only Admin) Gửi lệnh RCON tới CS2 server |
+
+## Current issue:
+- Where are API `POST matches` and API `POST edit` ?
+- When will we call API `POST side`?
+- Decider map has not been inserted to the database yet?
